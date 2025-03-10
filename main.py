@@ -1,42 +1,35 @@
 import discord
 from discord.ext import commands
-from discord.ui import Button, View
+from discord.ui import Button, View, Modal, TextInput
 import asyncio
 import random
 import io
 import os
+import logging
 
+# Configuração do logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
-# ============ CONFIGURAÇÕES DO BOT ============
-TOKEN = os.environ["Token"]  # Substitua pelo seu token de bot válido
+# ============ CONFIGURAÇÕES GLOBAIS ============
+TOKEN = os.environ["Token"]  # Seu token do bot
 GUILD_ID = 1346523864699506829  # ID do servidor
 
-# Cargo que restringe (Visitante)
-CARGO_RESTRITO_ID = 1346529577865969695
-
-# Cargo "Técnico de Tunagem" (quem pode habilitar a prova)
-CARGO_TEC_TUNAGEM_ID = 1346549148773519362
+# IDs dos cargos
+CARGO_RESTRITO_ID = 1346529577865969695       # Cargo de "Visitante" (restrição)
+CARGO_TEC_TUNAGEM_ID = 1346549148773519362     # Cargo "Técnico de Tunagem" (habilitação)
 
 # Canais fixos
-CANAL_AUTORIZACAO_ID = 1346529407375769742  # Canal onde IDs são autorizados
-CANAL_PROVA_ID = 1346529440389402624        # Canal onde o usuário clica para iniciar a prova
-CANAL_LOG_ID = 1346539009395916891          # Canal onde serão enviados os transcripts
+CANAL_AUTORIZACAO_ID = 1346529407375769742  # Canal de habilitação
+CANAL_PROVA_ID = 1346529440389402624        # Canal onde o botão de prova fica
+CANAL_LOG_ID = 1346539009395916891          # Canal para transcript
 
-# Categoria onde o canal de prova será criado
+# Categoria para criação do canal de prova
 CATEGORIA_PROVA_ID = 1346565192200355963
 
-intents = discord.Intents.default()
-intents.guilds = True
-intents.members = True
-intents.messages = True
-intents.message_content = True  # Necessário para ler o conteúdo das mensagens
+# Lista global de IDs autorizados para iniciar a prova
+autorizados = set()
 
-bot = commands.Bot(command_prefix="/", intents=intents)
-
-# ============ DADOS DA PROVA ============
-autorizados = set()  # IDs de usuários que podem iniciar a prova
-
-# Perguntas (com pesos)
+# Perguntas da prova (texto, peso)
 PERGUNTAS = [
     ("CITE 3 MOTIVOS QUE GERAM ADVERTÊNCIA", 2),
     ("QUAL VALOR DO MÓDULO NEON E KIT REPARO COM E SEM PARCERIA?", 2),
@@ -55,20 +48,20 @@ PERGUNTAS = [
     ("CITE NO MÍNIMO 5 PARCERIAS DO ILEGAL ATIVAS", 2)
 ]
 
-# ===================== EMBEDS =====================
+# Embeds padrão
 embed_iniciar_prova = discord.Embed(
     title="Bem Vindo ao Sistema de Provas da RedLine",
     description=(
-        "**Atenção:**\n"
-        "Ao iniciar a prova, todos os seus cargos serão retirados e você perderá acesso a vários canais do servidor. "
-        "O tempo da prova será reiniciado e seus cargos serão devolvidos ao final da prova.\n\n"
-        "- Ao iniciar a prova você terá 1 minuto para responder cada questão.\n"
-        "- Para cada pergunta errada ou não respondida você perderá 20 pontos.\n"
-        "- Atingir menos de 18 pontos resulta em advertência.\n"
-        "- Atingir menos de 10 pontos fica sujeito a PD.\n"
-        "- A prova tem um total de 15 questões e um total de 30 pontos.\n\n"
-        "**Observação:** Após terminar a prova, aguarde que um superior faça a correção, lembrando que a prova será salva.\n\n"
-        "Quando estiver pronto, clique no botão abaixo para iniciar a prova:"
+          "**Atenção:**\n"
+            "Ao iniciar a prova, todos os seus cargos serão retirados e você perderá acesso a vários canais do servidor. "
+            "Os seus cargos serão devolvidos ao final da prova.\n\n"
+            "- Ao iniciar a prova você terá 1 minuto para responder cada questão.\n"
+            "- Você precisa tirar 20 ou mais pontos para passar na prova.\n"
+            "- Atingir entre 15 e 18 pontos resulta em advertência e precisará farmar 100 kits.\n"
+            "- Atingir menos de 10 pontos fica sujeito a PD e precisará farmar 300 kits.\n"
+            "- A prova tem um total de 15 questões e vale um total de 30 pontos.\n\n"
+            "**Observação:** Após terminar a prova, aguarde que um superior faça a correção, lembrando que a prova será salva.\n\n"
+            "Quando estiver pronto, clique no botão abaixo para iniciar a prova:"
     ),
     color=discord.Color.red()
 )
@@ -76,184 +69,247 @@ embed_iniciar_prova = discord.Embed(
 embed_habilitar_prova = discord.Embed(
     title="📝 HABILITAR PROVA 📝",
     description=(
-        "Para habilitar alguém a fazer a prova, clique no botão abaixo.\n\n"
-        "Apenas **Técnico de Tunagem** pode habilitar!"
+        "Clique no botão abaixo para habilitar o menor aprendiz para a prova.\n"
+        "Apenas **Técnico de Tunagem** ou superior pode realizar essa ação!"
     ),
     color=discord.Color.blue()
 )
 
+# ============ INTENTS E BOT ============
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True        # Necessário para acessar os membros do servidor
+intents.messages = True
+intents.message_content = True  # Necessário para ler o conteúdo das mensagens
+
+bot = commands.Bot(command_prefix="/", intents=intents)
+
 # ============ FUNÇÕES DE LIMPEZA ============
-
-async def cleanup_authorization_channel():
-    """Aguarda 5s, limpa o canal de autorização e reenvia a mensagem inicial."""
+async def cleanup_authorization_channel(bot_instance: commands.Bot):
+    """Limpa o canal de autorização e reenvia a mensagem padrão."""
     await asyncio.sleep(5)
-    guild = bot.get_guild(GUILD_ID)
+    guild = bot_instance.get_guild(GUILD_ID)
     canal_autorizacao = guild.get_channel(CANAL_AUTORIZACAO_ID)
-    await canal_autorizacao.purge(limit=None, check=lambda m: not m.pinned)
-    await canal_autorizacao.send(embed=embed_habilitar_prova, view=AutorizarView())
+    try:
+        await canal_autorizacao.purge(limit=None, check=lambda m: not m.pinned)
+        # Obtém a view do cog de autorização
+        cog = bot_instance.get_cog("AuthorizationCog")
+        if cog is not None:
+            view_instance = cog.get_view_instance()
+            await canal_autorizacao.send(embed=embed_habilitar_prova, view=view_instance)
+        else:
+            logging.error("AuthorizationCog não encontrado!")
+    except Exception as e:
+        logging.error("Erro na limpeza do canal de autorização: %s", e)
 
-async def cleanup_main_prova_channel():
-    """Aguarda 5s, limpa o canal principal de provas e reenvia a mensagem inicial."""
+async def cleanup_main_prova_channel(bot_instance: commands.Bot):
+    """Limpa o canal de prova e reenvia a mensagem padrão."""
     await asyncio.sleep(5)
-    guild = bot.get_guild(GUILD_ID)
+    guild = bot_instance.get_guild(GUILD_ID)
     canal_prova = guild.get_channel(CANAL_PROVA_ID)
-    await canal_prova.purge(limit=None, check=lambda m: not m.pinned)
-    await canal_prova.send(embed=embed_iniciar_prova, view=ProvaView())
+    try:
+        await canal_prova.purge(limit=None, check=lambda m: not m.pinned)
+        cog = bot_instance.get_cog("TestCog")
+        if cog is not None:
+            view_instance = cog.get_view_instance()
+            await canal_prova.send(embed=embed_iniciar_prova, view=view_instance)
+        else:
+            logging.error("TestCog não encontrado!")
+    except Exception as e:
+        logging.error("Erro na limpeza do canal de prova: %s", e)
 
-# ===================== VIEW DA PROVA (INICIAR) =====================
-class ProvaView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
+# ============ COG DE AUTORIZAÇÃO ============
+class AuthorizationCog(commands.Cog, name="AuthorizationCog"):
+    def __init__(self, bot_instance: commands.Bot):
+        self.bot = bot_instance
 
-    @discord.ui.button(label="Iniciar Prova", style=discord.ButtonStyle.red, custom_id="iniciar_prova")
-    async def iniciar_prova(self, interaction: discord.Interaction, button: Button):
-        """Cria um canal de prova e inicia o processo, se o usuário estiver autorizado."""
-        member = interaction.user
+    def get_view_instance(self):
+        return self.AutorizarView()
 
-        if member.id not in autorizados:
-            await interaction.response.send_message("Você não está autorizado!", ephemeral=True)
-            return
-
-        autorizados.remove(member.id)
-        guild = bot.get_guild(GUILD_ID)
-        old_roles = [r for r in member.roles if r != guild.default_role]
-        for r in old_roles:
-            await member.remove_roles(r)
-        cargo_visitante = guild.get_role(CARGO_RESTRITO_ID)
-        await member.add_roles(cargo_visitante)
-        categoria_prova = guild.get_channel(CATEGORIA_PROVA_ID)
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
-        canal_temp = await guild.create_text_channel(
-            name=f"prova-{member.display_name}",
-            category=categoria_prova,
-            overwrites=overwrites
-        )
-        await interaction.response.send_message(
-            f"{member.mention}, seu canal de prova foi criado: {canal_temp.mention}",
-            ephemeral=True
-        )
-        await canal_temp.send(
-            f"{member.mention}, sua prova começou! Você tem 1 minuto para responder cada questão."
-        )
-
-        # Coleta as respostas do usuário para as 15 perguntas sorteadas
-        perguntas_sorteadas = random.sample(PERGUNTAS, 15)
-        respostas = []
-        for i, (pergunta, peso) in enumerate(perguntas_sorteadas, start=1):
-            await canal_temp.send(f"**{i}) {pergunta}** (Peso: {peso} pontos)")
-            def resposta_check(m):
-                return m.author == member and m.channel == canal_temp
-            try:
-                msg = await bot.wait_for("message", check=resposta_check, timeout=60)
-                respostas.append((pergunta, msg.content))
-            except asyncio.TimeoutError:
-                respostas.append((pergunta, "Não respondeu"))
-                await canal_temp.send("Tempo esgotado para essa questão!")
-
-        await canal_temp.send(f"{member.mention}, sua prova acabou! Estou restaurando seus cargos...")
-        await member.remove_roles(cargo_visitante)
-        for r in old_roles:
-            await member.add_roles(r)
-
-        # Gera um transcript formatado de maneira agradável
-        transcript_str = (
-            "========================================\n"
-            "           TRANSCRIPT DA PROVA          \n"
-            "========================================\n\n"
-            f"Nome: {member.display_name}\n"
-            f"ID: {member.id}\n\n"
-        )
-        for idx, (pergunta, resposta) in enumerate(respostas, start=1):
-            transcript_str += (
-                f"Questão {idx}:\n"
-                f"Pergunta: {pergunta}\n"
-                f"Resposta: {resposta}\n"
-                "----------------------------------------\n\n"
+    class HabilitarModal(Modal):
+        def __init__(self):
+            super().__init__(title="RedLine Performance", timeout=180, custom_id="habilitar_modal")
+            self.user_id_input = TextInput(
+                label="Insira o ID",
+                style=discord.TextStyle.short,
+                placeholder="Digite o ID do usuário aqui",
+                required=True,
+                max_length=30
             )
+            self.add_item(self.user_id_input)
 
-        canal_log = guild.get_channel(CANAL_LOG_ID)
-        file_buffer = io.BytesIO(transcript_str.encode('utf-8'))
-        await canal_log.send(
-            content=f"Transcript da prova de {member.display_name} (ID {member.id}):",
-            file=discord.File(file_buffer, filename=f"prova_{member.id}.txt")
-        )
-
-        await canal_temp.send("Este canal será deletado em instantes...")
-        await asyncio.sleep(2)
-        await canal_temp.delete()
-
-        await interaction.followup.send(
-            f"{member.mention}, prova finalizada e transcript salvo no log!",
-            ephemeral=True
-        )
-        await cleanup_main_prova_channel()
-
-# ===================== VIEW PARA HABILITAR PROVA =====================
-class AutorizarView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Habilitar Prova", style=discord.ButtonStyle.green, custom_id="habilitar_prova")
-    async def habilitar_prova(self, interaction: discord.Interaction, button: Button):
-        """Só quem for 'Técnico de Tunagem' pode habilitar a prova."""
-        member = interaction.user
-        guild = bot.get_guild(GUILD_ID)
-        cargo_tec = guild.get_role(CARGO_TEC_TUNAGEM_ID)
-        if cargo_tec not in member.roles:
-            await interaction.response.send_message(
-                "Você não tem cargo de Técnico de Tunagem para habilitar!",
-                ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            "Envie o **ID do usuário** ou um trecho presente no apelido para habilitar:",
-            ephemeral=True
-        )
-        def check(m):
-            return m.author == member and m.channel == interaction.channel
-        try:
-            msg = await bot.wait_for("message", check=check, timeout=90)
-            user_id_str = msg.content.strip()
-            target_member = discord.utils.find(
-                lambda m: m.nick and user_id_str.lower() in m.nick.lower(),
-                guild.members
-            )
-            if target_member is None:
-                try:
-                    possible_id = int(user_id_str)
-                    target_member = guild.get_member(possible_id)
-                except ValueError:
-                    await interaction.channel.send(
-                        "Não encontrei esse apelido nem consegui converter para ID numérico."
-                    )
-                    await cleanup_authorization_channel()
-                    return
-            if target_member is None:
-                await interaction.channel.send(
-                    "Usuário não encontrado. Verifique o apelido/ID e tente novamente."
-                )
-                await cleanup_authorization_channel()
+        async def on_submit(self, interaction: discord.Interaction):
+            guild = interaction.client.get_guild(GUILD_ID)
+            cargo_tec = guild.get_role(CARGO_TEC_TUNAGEM_ID)
+            if cargo_tec not in interaction.user.roles:
+                await interaction.response.send_message("Você não tem permissão para habilitar a prova!", ephemeral=True)
                 return
+
+            user_id_str = self.user_id_input.value.strip()
+            try:
+                possible_id = int(user_id_str)
+                target_member = guild.get_member(possible_id)
+                if target_member is None:
+                    target_member = await guild.fetch_member(possible_id)
+            except (ValueError, discord.NotFound):
+                target_member = discord.utils.find(
+                    lambda m: m.nick and user_id_str.lower() in m.nick.lower(),
+                    guild.members
+                )
+            if target_member is None:
+                await interaction.response.send_message("Usuário não encontrado. Verifique o ID ou apelido.", ephemeral=True)
+                await cleanup_authorization_channel(interaction.client)
+                return
+
             autorizados.add(target_member.id)
-            await interaction.channel.send(
-                f"Usuário {target_member.mention} está habilitado para iniciar a prova!"
+            await interaction.response.send_message(
+                f"Usuário {target_member.mention} foi habilitado para iniciar a prova!",
+                ephemeral=False
             )
-        except asyncio.TimeoutError:
-            await interaction.channel.send("Tempo expirado. Tente novamente.")
-        finally:
-            await cleanup_authorization_channel()
+            await cleanup_authorization_channel(interaction.client)
+
+    class AutorizarView(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="Habilitar Prova", style=discord.ButtonStyle.green, custom_id="habilitar_prova")
+        async def habilitar_prova(self, interaction: discord.Interaction, button: Button):
+            guild = interaction.client.get_guild(GUILD_ID)
+            cargo_tec = guild.get_role(CARGO_TEC_TUNAGEM_ID)
+            if cargo_tec not in interaction.user.roles:
+                await interaction.response.send_message(
+                    "Você não tem cargo de Técnico de Tunagem para habilitar!",
+                    ephemeral=True
+                )
+                return
+            await interaction.response.send_modal(AuthorizationCog.HabilitarModal())
+
+    @commands.Cog.listener()
+    async def on_error(self, event_method, *args, **kwargs):
+        logging.error("Erro no Cog de Autorização: %s", event_method, exc_info=True)
+
+# ============ COG DE PROVA ============
+class TestCog(commands.Cog, name="TestCog"):
+    def __init__(self, bot_instance: commands.Bot):
+        self.bot = bot_instance
+
+    def get_view_instance(self):
+        return self.ProvaView()
+
+    class ProvaView(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="Iniciar Prova", style=discord.ButtonStyle.red, custom_id="iniciar_prova")
+        async def iniciar_prova(self, interaction: discord.Interaction, button: Button):
+            member = interaction.user
+            if member.id not in autorizados:
+                await interaction.response.send_message("Você não está autorizado!", ephemeral=True)
+                return
+            autorizados.remove(member.id)
+
+            guild = interaction.client.get_guild(GUILD_ID)
+            old_roles = [r for r in member.roles if r != guild.default_role]
+            try:
+                for r in old_roles:
+                    await member.remove_roles(r)
+                cargo_visitante = guild.get_role(CARGO_RESTRITO_ID)
+                await member.add_roles(cargo_visitante)
+            except Exception as e:
+                logging.error("Erro ao modificar cargos do usuário: %s", e)
+                await interaction.response.send_message("Erro ao ajustar seus cargos. Tente novamente.", ephemeral=True)
+                return
+
+            categoria_prova = guild.get_channel(CATEGORIA_PROVA_ID)
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            }
+            try:
+                canal_temp = await guild.create_text_channel(
+                    name=f"prova-{member.display_name}",
+                    category=categoria_prova,
+                    overwrites=overwrites
+                )
+            except Exception as e:
+                logging.error("Erro ao criar canal de prova: %s", e)
+                await interaction.response.send_message("Erro ao criar canal de prova. Tente novamente.", ephemeral=True)
+                return
+
+            await interaction.response.send_message(
+                f"{member.mention}, seu canal de prova foi criado: {canal_temp.mention}!"
+            )
+            await canal_temp.send(
+                f"{member.mention}, **sua prova começou!** Você tem 1 minuto para responder cada questão.\nResponda abaixo de cada pergunta."
+            )
+
+            perguntas_sorteadas = random.sample(PERGUNTAS, 15)
+            respostas = []
+            for i, (pergunta, peso) in enumerate(perguntas_sorteadas, start=1):
+                await canal_temp.send(f"**{i}) {pergunta}** (Peso: {peso} pontos)")
+                def resposta_check(m):
+                    return m.author == member and m.channel == canal_temp
+                try:
+                    msg = await interaction.client.wait_for("message", check=resposta_check, timeout=60)
+                    respostas.append((pergunta, msg.content))
+                except asyncio.TimeoutError:
+                    respostas.append((pergunta, "Não respondeu"))
+                    await canal_temp.send("Tempo esgotado para essa questão!")
+
+            await canal_temp.send(f"{member.mention}, sua prova acabou! Estou restaurando seus cargos...")
+            try:
+                await member.remove_roles(cargo_visitante)
+                for r in old_roles:
+                    await member.add_roles(r)
+            except Exception as e:
+                logging.error("Erro ao restaurar cargos: %s", e)
+
+            transcript_str = (
+                "========================================\n"
+                "           TRANSCRIPT DA PROVA          \n"
+                "========================================\n\n"
+                f"Nome: {member.display_name}\n"
+                f"ID: {member.id}\n\n"
+            )
+            for idx, (pergunta, resposta) in enumerate(respostas, start=1):
+                transcript_str += (
+                    f"Questão {idx}:\n"
+                    f"Pergunta: {pergunta}\n"
+                    f"Resposta: {resposta}\n"
+                    "----------------------------------------\n\n"
+                )
+            canal_log = guild.get_channel(CANAL_LOG_ID)
+            file_buffer = io.BytesIO(transcript_str.encode('utf-8'))
+            try:
+                await canal_log.send(
+                    content=f"Transcript da prova de {member.display_name} (ID {member.id}):",
+                    file=discord.File(file_buffer, filename=f"prova_{member.id}.txt")
+                )
+            except Exception as e:
+                logging.error("Erro ao enviar transcript: %s", e)
+
+            await canal_temp.send("Este canal será deletado em instantes...")
+            await asyncio.sleep(2)
+            try:
+                await canal_temp.delete()
+            except Exception as e:
+                logging.error("Erro ao deletar canal de prova: %s", e)
+            await cleanup_main_prova_channel(interaction.client)
+
+    @commands.Cog.listener()
+    async def on_error(self, event_method, *args, **kwargs):
+        logging.error("Erro no Cog de Prova: %s", event_method, exc_info=True)
 
 # ============ EVENTOS ============
 @bot.event
 async def on_ready():
-    print(f"Bot conectado como {bot.user}")
-    bot.add_view(ProvaView())
-    bot.add_view(AutorizarView())
-    await cleanup_authorization_channel()
-    await cleanup_main_prova_channel()
+    logging.info(f"Bot conectado como {bot.user}")
+    # Adiciona os cogs aguardando-os corretamente
+    await bot.add_cog(AuthorizationCog(bot))
+    await bot.add_cog(TestCog(bot))
+    # Após os cogs serem adicionados, executa a limpeza dos canais
+    await cleanup_authorization_channel(bot)
+    await cleanup_main_prova_channel(bot)
 
 bot.run(TOKEN)
